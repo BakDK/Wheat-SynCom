@@ -1,6 +1,7 @@
-# some import from step3_initial_plots.R is needed
+# Plot Figure 5
 library(ampvis2)
 library(tidyverse)
+library(lemon)
 comb_amp<-readRDS("total_ampvis.rds")
 
 # Start by extracting SynCom ASVs from the Inoculation samples and then plot only these
@@ -47,9 +48,12 @@ df3$Treatment[df3$Treatment %in% "Field_Heerup"]<-"Field Heerup"
 
 df3$Treatment<-factor(df3$Treatment, levels =c("SynCom","NatCom","Field Sheriff","Field Heerup"))
 levels(df3$Treatment)
-saveRDS(df3,"Rel_abun_long_format_SC_gen.rds")
 
-library(lemon)
+df3$Genus<-factor(df3$Genus, levels = c("Flavobacterium", "Variovorax", "Bacillus", "Pararhizobium",
+                                        "Ensifer","Peribacillus",
+                                        "Agrobacterium","Stenotrophomonas",
+                                        "Pseudomonas","Paenarthrobacter","Microbacterium", "Arthrobacter","Pedobacter"))
+
 plot_p4<-ggplot(df3,aes(x = Days, y = log10(Rel_abundance), color = Genus))+
   geom_point(alpha = 0.5,  size = 1)+
   facet_rep_grid(Genus~Treatment,scales = "free_y", repeat.tick.labels = FALSE,switch = "y",space = "free")+ 
@@ -71,5 +75,5 @@ plot_p4<-ggplot(df3,aes(x = Days, y = log10(Rel_abundance), color = Genus))+
 x11(height = 11, width =10)
 plot_p4
 
-ggsave("test_plots/fig5.png",plot_p4, height = 11, width = 10,units = "in",dpi = 300,device = "png")
+ggsave("fig5.png",plot_p4, height = 11, width = 10,units = "in",dpi = 300,device = "png")
 
