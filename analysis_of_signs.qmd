@@ -1,0 +1,264 @@
+---
+title: "Analysis of signs"
+author: "Bo Markussen"
+institute: "Department of Mathematical Sciences"
+date: "April 27, 2024"
+format: docx
+execute: 
+  eval: true
+  echo: true
+  warning: false
+  message: false
+---
+
+
+# Introduction
+
+This R-Quarto script implements the *Conservative-One-Sided-Test* procedure (COST) done in the paper ***Synthetic bacterial community mimics the assembly pattern of a field community on wheat roots grown in soil***. The objective is to provide evidence for equal signs of slopes.
+
+The following three subsections contain preparation of the analysis. Thereafter the actual analysis is done in the subsections of Section **Statistical Analysis**. 
+
+## Load packages
+
+The script relies on the following R packages.
+
+```{r load packages}
+library(tidyverse)      # Used version: 2.0.0
+library(ggfortify)      # Used version: 0.4.17
+library(kableExtra)     # Used version: 1.4.0
+library(AER)            # Used version: 1.2-14
+library(emmeans)        # Used version: 1.10.7
+```
+
+## Read dataset
+
+The data is available in the file `Rel_abun_long_format_SC_gen.rds`. As described in the paper we exclude observations of genus *Ensifer* for *Field Heerup* and genus *Pedobacter* for both *Field Sheriff* and *Field Heerup*, and we also exclude observations collected before *Day 10*.
+
+```{r read dataset}
+mydata <- 
+  readRDS(file = "Rel_abun_long_format_SC_gen.rds") %>%
+  filter(Days > 10) %>% 
+  filter(!((Genus=="Ensifer") & (Treatment %in% c("Field Heerup")))) %>% 
+  filter(!((Genus=="Pedobacter") & (Treatment %in% c("Field Sheriff","Field Heerup")))) %>% 
+  mutate(
+    Sample_ID=factor(Sample_ID),
+    Genus=factor(Genus),
+    Treatment=factor(Treatment,levels=c("SynCom","NatCom","Field Sheriff","Field Heerup"))
+  )
+```
+
+
+## Implementation of additional functions
+
+The COST procedure has been developed for this paper, and hence it is not available in existing R packages. Below we implement a R function to perform the COST procedure on the slopes in the particular ANCOVA model used in the paper. This function performs the COST procedure for both equal and different signs using the first level as reference (which is `SynCom`, see Section **Read dataset**). 
+
+
+```{r COST procedure}
+COST <- function(model) {
+  # extract slopes
+  slopes <- as_tibble(emtrends(model,~Treatment,var="Days",infer=TRUE,adjust="none"))
+  # perform pairwise COSTs
+  lapply(1:4,function(i){
+    slopes %>%
+      select(-SE,-df,-t.ratio) %>% 
+      mutate(
+        variable_A=Treatment[i],
+        variable_B=Treatment,
+        slope_A=paste(ifelse(Days.trend[i]>0,"↑ (p=","↓ (p="),p_round(p.value[i],TRUE),")",sep=""),
+        slope_B=paste(ifelse(Days.trend>0,"↑ (p=","↓ (p="),p_round(p.value,TRUE),")",sep=""),
+        equal_sign=ifelse(Days.trend*(Days.trend[i])<0,1,
+                          p_round(pmax(p.value,p.value[i])/2)),
+        diff_sign=ifelse(Days.trend*(Days.trend[i])>0,1,
+                          p_round(pmax(p.value,p.value[i])/2)),
+        `Slope signs`=as.character(ifelse(equal_sign<diff_sign,"Equal","Different"))
+      ) %>%
+      filter(variable_A!=variable_B) %>% 
+      select(variable_A,variable_B,`Slope signs`,slope_A,slope_B,equal_sign,diff_sign)
+  }) %>% 
+    bind_rows() %>% 
+    return()
+}
+```
+
+The following function performs upward rounding of p-values to 4 digits. This is used for the automatized report of results in annotated tables.
+
+```{r pvalue rounding}
+p_round <- function(p,character=FALSE,digits=4) {
+  p <- ceiling((10^digits)*p)/(10^digits)
+  if (character) p <- format(p,nsmall=digits,scientific=FALSE)
+  return(p)
+}
+```
+
+# Statistical analysis
+
+The statistical analysis is divided into four subsections. Subsection **Analysis of zeros** provides an overview of the zeros in the data across genera and days, subsection **Estimation of statistical models** describes and estimates the used ANCOVA models, subsection **COST analysis** shows the results of the COST procedure (in 4 different constrast of conditions), and finally subsection **Validation of statistical models** provides model validation plots for the used ANCOVA models.
+
+## Analysis of zeros
+
+The following table provides an overview of the proportion of 0's and means of the non-zeros across days. For the field conditions we see that the proportion of 0's remains high at approximately 25% across the three observation days. There are few 0's for `SynCom`, but with a slight increase at day 28. For `NatCom` we have more 0's, and also with an increase at day 28.
+
+```{r overview of zeros}
+mydata %>%
+  group_by(Treatment,Days) %>% 
+  summarize(
+    prop_zero=mean(Rel_abundance==0),
+    mean_non_zero=mean(Rel_abundance[Rel_abundance>0])
+  ) %>% 
+  arrange(Treatment,Days) %>% 
+  kable(digits=3)
+```
+
+
+## Estimation of statistical models
+
+We fit separate ANCOVA models for the individual genera. This is done on a logarithmic scale:
+
+$$
+\log(\text{Relative abundance$_i$}) = \alpha(\text{Treatment$_i$}) + \beta(\text{Treatment$_i$}) \cdot \text{Days$_i$} + \epsilon_i,
+$$
+where $\epsilon_i \sim \mathcal{N}(0,\sigma^2)$. Here the parameters $\alpha$, $\beta$, and $\sigma$ are estimated separately for each genus. The estimation of the models on the logarithmic scale requires a way to handle the 0's. We do this in a *Tobit regression*, where the 0's are interpreted as *truncated observations below the detection limit*. As the detection limit (left censoring point in the Tobit regression) we use the minimum value of the non-zero observations. 
+
+The Tobit regression is done via the `tobit()` function from the `AER`-package. However, the default possibilities for model diagnostic plots are only readily available for `lm`-object. Thus, the model validation will be done for the models where we simply have removed the 0's. The model validation plots are shown in subsection **Validation of statistical models**, and all models are statistically valid. It should be noted, that the logarithmic transformation is necessary in order to have statistically valid models. 
+
+```{r ANCOVA fit separately for each genus}
+res <- 
+  mydata %>%
+  group_by(Genus) %>% 
+  nest() %>% 
+  arrange(Genus) %>% 
+  mutate(
+    n=map_dbl(data,nrow),
+    zeros=map_dbl(data,~sum(.$Rel_abundance==0)),
+    min_non_zero=map_dbl(data,~min(.$Rel_abundance[.$Rel_abundance>0])),
+    max=map_dbl(data,~max(.$Rel_abundance)),
+    tobit=map2(data,0.9999*min_non_zero,
+               ~tobit(log(Rel_abundance)~Treatment*Days,left=log(.y),
+                      data=.x)),
+    validation=map2(data,Genus,
+                    ~autoplot(
+                      lm(log(Rel_abundance)~Treatment*Days,
+                         data=filter(.x,Rel_abundance>0))
+                      ) +ggtitle(.y)),
+    sigma=map_dbl(tobit,~.$scale),
+    COST=map(tobit,COST)
+  )
+```
+
+
+The following table shows the number of observations, the number of zeros, the minimal non-zero observation, the maximal observation, and the estimated standard deviation of the errors on the logarithmic scale. All this within the 13 genera.
+
+```{r data and model overview}
+res %>% 
+  select(Genus,n,zeros,min_non_zero,max,sigma) %>% 
+  arrange(Genus) %>% 
+  kable(digits=4)
+```
+
+## COST ananlysis
+
+In the results below we have also inserted controls for the *false discovery rate* using the *Benjamine-Hochberg* procedure within the following comparions:
+
+1.  Slopes of `SynCom` against slopes of `NatCom`
+
+2.  Slopes of `SynCom` against slopes of `Fiels Sheriff`
+
+3.  Slopes of `SynCom` against slopes of `Fiels Heerup`
+
+4.  Slopes of `Field Sheriff` against slopes of `Fiels Heerup`
+
+### Comparing slopes of `SynCom` against slopes of `NatCom`
+
+```{r}
+res %>% 
+  select(Genus,COST) %>% 
+  unnest(COST) %>%
+  filter(variable_A=="SynCom",variable_B=="NatCom") %>% 
+  arrange(equal_sign,diff_sign) %>%
+  bind_cols(
+    fdr=ifelse(.$equal_sign <= .$diff_sign,p.adjust(.$equal_sign,"BH"),
+               p.adjust(.$diff_sign,"BH"))
+  ) %>% 
+  mutate(
+    fdr=round(fdr,3),
+    `p-value`=min(equal_sign,diff_sign)
+  ) %>% 
+  select(`Slope signs`,Genus,slope_A,slope_B,`p-value`,fdr) %>%
+  rename(SynCom=slope_A,NatCom=slope_B) %>% 
+  kable()
+```
+
+### Comparing slopes of `SynCom` against slopes of `Field Sheriff`
+
+```{r}
+res %>%
+  select(Genus,COST) %>% 
+  unnest(COST) %>%
+  filter(variable_A=="SynCom",variable_B=="Field Sheriff") %>% 
+  arrange(equal_sign,diff_sign) %>%
+  bind_cols(
+    fdr=ifelse(.$equal_sign <= .$diff_sign,p.adjust(.$equal_sign,"BH"),
+               p.adjust(.$diff_sign,"BH"))
+  ) %>% 
+  mutate(
+    fdr=round(fdr,3),
+    `p-value`=min(equal_sign,diff_sign)
+  ) %>% 
+  select(`Slope signs`,Genus,slope_A,slope_B,`p-value`,fdr) %>%
+  rename(SynCom=slope_A,`Field Sheriff`=slope_B) %>% 
+  kable()
+```
+
+### Comparing slopes of `SynCom` against slopes of `Field Heerup`
+
+```{r}
+res %>% 
+  select(Genus,COST) %>% 
+  unnest(COST) %>%
+  filter(variable_A=="SynCom",variable_B=="Field Heerup") %>% 
+  arrange(equal_sign,diff_sign) %>%
+  bind_cols(
+    fdr=ifelse(.$equal_sign <= .$diff_sign,p.adjust(.$equal_sign,"BH"),
+               p.adjust(.$diff_sign,"BH"))
+  ) %>% 
+  mutate(
+    fdr=round(fdr,3),
+    `p-value`=min(equal_sign,diff_sign)
+  ) %>% 
+  select(`Slope signs`,Genus,slope_A,slope_B,`p-value`,fdr) %>%
+  rename(SynCom=slope_A,`Field Heerup`=slope_B) %>% 
+  kable()
+```
+
+### Comparing slopes of `Field Sheriff` against slopes of `Field Heerup`
+
+```{r}
+res %>% 
+  select(Genus,COST) %>% 
+  unnest(COST) %>%
+  filter(variable_A=="Field Sheriff",variable_B=="Field Heerup") %>% 
+  arrange(equal_sign,diff_sign) %>%
+  bind_cols(
+    fdr=ifelse(.$equal_sign <= .$diff_sign,p.adjust(.$equal_sign,"BH"),
+               p.adjust(.$diff_sign,"BH"))
+  ) %>% 
+  mutate(
+    fdr=round(fdr,3),
+    `p-value`=min(equal_sign,diff_sign)
+  ) %>% 
+  select(`Slope signs`,Genus,slope_A,slope_B,`p-value`,fdr) %>%
+  rename(`Field Sheriff`=slope_A,`Field Heerup`=slope_B) %>% 
+  kable()
+```
+
+
+## Validation of statistical models.
+
+The following diagnostic plots show, that the models are statistically valid.
+
+```{r}
+for (i in 1:nrow(res)) print(res$validation[[i]])
+```
+
+
+*End of document*
